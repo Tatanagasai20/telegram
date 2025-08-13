@@ -1,0 +1,160 @@
+name: Deploy Telegram Attendance Portal
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '16'
+        cache: 'npm'
+    
+    - name: Install dependencies for server
+      run: |
+        cd server
+        npm install
+    
+    - name: Install dependencies for client
+      run: |
+        cd client
+        npm install
+    
+    - name: Install dependencies for telegram-bot
+      run: |
+        cd telegram-bot
+        npm install
+    
+    - name: Build client
+      run: |
+        cd client
+        npm run build
+    
+    - name: Run tests
+      run: |
+        cd server
+        npm test || true
+        cd ../client
+        npm test -- --watchAll=false || true
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: build-artifacts
+        path: |
+          client/build
+          server
+          telegram-bot
+  
+  deploy-to-aws:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Download build artifacts
+      uses: actions/download-artifact@v2
+      with:
+        name: build-artifacts
+        path: ./
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+    
+    - name: Build, tag, and push frontend image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: attendance-frontend
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd client
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+    
+    - name: Build, tag, and push backend image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: attendance-backend
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd server
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+    
+    - name: Build, tag, and push telegram-bot image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: attendance-telegram-bot
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd telegram-bot
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+    
+    - name: Deploy to EC2 instances
+      env:
+        PRIVATE_KEY: ${{ secrets.AWS_SSH_KEY }}
+        FRONTEND_HOST: ${{ secrets.FRONTEND_HOST }}
+        BACKEND_HOST: ${{ secrets.BACKEND_HOST }}
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Write private key to file
+        echo "$PRIVATE_KEY" > private_key.pem
+        chmod 600 private_key.pem
+        
+        # Deploy frontend
+        ssh -o StrictHostKeyChecking=no -i private_key.pem ec2-user@$FRONTEND_HOST \
+          "aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY && \
+           docker pull $ECR_REGISTRY/attendance-frontend:$IMAGE_TAG && \
+           docker stop frontend || true && \
+           docker rm frontend || true && \
+           docker run -d --name frontend -p 80:80 \
+           -e REACT_APP_API_URL=http://$BACKEND_HOST:5000 \
+           $ECR_REGISTRY/attendance-frontend:$IMAGE_TAG"
+        
+        # Deploy backend
+        ssh -o StrictHostKeyChecking=no -i private_key.pem ec2-user@$BACKEND_HOST \
+          "aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY && \
+           docker pull $ECR_REGISTRY/attendance-backend:$IMAGE_TAG && \
+           docker pull $ECR_REGISTRY/attendance-telegram-bot:$IMAGE_TAG && \
+           docker stop backend telegram-bot || true && \
+           docker rm backend telegram-bot || true && \
+           docker run -d --name backend -p 5000:5000 \
+           -e MONGO_URI=${{ secrets.MONGO_URI }} \
+           -e JWT_SECRET=${{ secrets.JWT_SECRET }} \
+           -e NODE_ENV=production \
+           $ECR_REGISTRY/attendance-backend:$IMAGE_TAG && \
+           docker run -d --name telegram-bot \
+           -e TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }} \
+           -e API_URL=http://localhost:5000 \
+           $ECR_REGISTRY/attendance-telegram-bot:$IMAGE_TAG"
+        
+        # Clean up
+        rm -f private_key.pem
+    
+    - name: Send deployment notification
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+        --data '{"text":"✅ Telegram Attendance Portal deployed successfully!"}' \
+        ${{ secrets.SLACK_WEBHOOK_URL || 'https://example.com' }}

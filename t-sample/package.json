@@ -1,0 +1,28 @@
+{
+  "name": "telegram-attendance-portal",
+  "version": "1.0.0",
+  "description": "Telegram-based attendance portal with MongoDB and React.js",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "server": "nodemon server/index.js",
+    "client": "npm start --prefix client",
+    "bot": "node telegram-bot/bot.js",
+    "dev": "concurrently \"npm run server\" \"npm run client\" \"npm run bot\"",
+    "install-all": "npm install && npm install --prefix client && npm install --prefix server && npm install --prefix telegram-bot"
+  },
+  "keywords": [
+    "telegram",
+    "attendance",
+    "mongodb",
+    "react"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

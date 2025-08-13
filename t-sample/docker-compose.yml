@@ -1,0 +1,69 @@
+version: '3'
+
+services:
+  # MongoDB service
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - app-network
+    restart: always
+
+  # Backend API service
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: backend
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongodb
+    environment:
+      - PORT=5000
+      - MONGO_URI=mongodb://mongodb:27017/attendance
+      - JWT_SECRET=your_jwt_secret_key
+      - NODE_ENV=development
+    networks:
+      - app-network
+    restart: always
+
+  # Telegram Bot service
+  telegram-bot:
+    build:
+      context: ./telegram-bot
+      dockerfile: Dockerfile
+    container_name: telegram-bot
+    depends_on:
+      - backend
+    environment:
+      - TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+      - API_URL=http://backend:5000
+    networks:
+      - app-network
+    restart: always
+
+  # Frontend service
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: always
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
